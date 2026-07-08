@@ -36,20 +36,32 @@ FFMPEG_API_DRIVER=auto                            # local | remote | auto
 
 ## What runs remotely
 
-A command is sent to the API only when the translator can represent it exactly.
-It **falls back to local** for:
+The translator classifies ffmpeg args by option arity, so it handles a broad
+set of commands and sends them to the API:
 
-- **multipass** (`-pass` / `-passlogfile`) — php-ffmpeg emits the two passes as
-  separate `command()` calls, so they cannot share a pass-log across stateless
-  remote jobs. Use single-pass (CRF or 1-pass ABR) to run these remotely;
-- **encrypted HLS** (`-hls_key_info_file`) — the key file path is unresolvable
-  on the node;
-- **probes** (`-version`, etc.) and any command whose I/O it can't model
-  (e.g. multiple outputs in one invocation).
+- **single-output** transcodes / muxes — remux, downscale, poster frames, audio;
+- **multiple outputs** in one invocation (e.g. split streams);
+- **HLS**, playlist + segment glob — including **AES-encrypted** HLS: the key is
+  uploaded and the `-hls_key_info_file` keyinfo is rewritten to a workdir-relative
+  key (the playlist `URI` line is kept verbatim);
+- **multipass** (`-pass` / `-passlogfile`) — php-ffmpeg emits each pass as a
+  separate `command()` call, so the driver **buffers the analysis pass(es) and
+  chains them with the final pass into ONE job** (they run sequentially in the
+  same node workdir, sharing the pass log). Nothing to change in your code.
 
-Supported today: single-output transcodes/muxes (remux, downscale, poster
-frames, audio) and plain HLS (playlist + segment glob). Progress listeners are
-not forwarded for remote jobs.
+It **falls back to the local binary** for what it can't model exactly: probes
+(`-version`), commands with no capturable output, tokens containing both quote
+characters, or any leftover unmodeled local path. Fallback is always safe — it
+never ships a job it isn't sure about.
+
+### Progress
+
+Per-frame progress is **not** forwarded for remote jobs. The public API is
+request/response (`?wait=true` blocks; webhooks fire only on completion) and
+exposes no ffmpeg progress stream on the bearer API, so php-ffmpeg's stderr
+progress listeners have nothing to consume. Jobs still run to completion; you
+just don't get a live percentage. (If the endpoint later exposes a job
+log/progress stream on the bearer API, this can be wired up.)
 
 ## Config
 

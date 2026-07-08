@@ -11,6 +11,7 @@ use Zupolgec\FFMpegApi\Exceptions\RemoteExecutionException;
 use Zupolgec\FFMpegApi\Http\ApiClient;
 use Zupolgec\FFMpegApi\Http\JobResult;
 use Zupolgec\FFMpegApi\Translation\CommandTranslator;
+use Zupolgec\FFMpegApi\Translation\KeyInfoRequest;
 use Zupolgec\FFMpegApi\Translation\TranslatedCommand;
 
 /**
@@ -29,6 +30,13 @@ class FFMpegApiDriver extends FFMpegDriver
     private ?int $timeoutSeconds = null;
 
     private ?LoggerInterface $apiLogger = null;
+
+    /**
+     * Buffered analysis passes, keyed by the shared -passlogfile identity.
+     *
+     * @var array<string, list<TranslatedCommand>>
+     */
+    private array $passBuffers = [];
 
     /**
      * @param  array<string, mixed>  $config
@@ -62,7 +70,9 @@ class FFMpegApiDriver extends FFMpegDriver
         }
 
         try {
-            return $this->runRemote($plan);
+            return $plan->isPass()
+                ? $this->runPass($plan)
+                : $this->runRemote($plan);
         } catch (Throwable $e) {
             if ($this->mode === 'remote' && ! $this->fallbackToLocal) {
                 throw new RemoteExecutionException('remote ffmpeg execution failed: '.$e->getMessage(), 0, $e);
@@ -76,24 +86,109 @@ class FFMpegApiDriver extends FFMpegDriver
 
     private function runRemote(TranslatedCommand $plan): string
     {
+        $job = $this->client->run(
+            $this->buildInputFiles($plan),
+            array_map(static fn ($o) => $o->name, $plan->outputs),
+            [$plan->commandString],
+            $this->timeoutSeconds,
+        );
+
+        $this->assertSucceeded($job);
+        $this->reconcileOutputs($plan, $job);
+
+        return "[ffmpeg-api] job {$job->id} succeeded";
+    }
+
+    /**
+     * Multipass: buffer the analysis pass(es), then chain them with the final
+     * pass into ONE remote job so the shared pass log survives across passes
+     * (they run sequentially in the same node workdir).
+     */
+    private function runPass(TranslatedCommand $plan): string
+    {
+        $id = (string) $plan->passLogId;
+
+        if (($plan->passNumber ?? 0) <= 1) {
+            $this->passBuffers[$id] = [$plan];
+
+            return '[ffmpeg-api] buffered pass 1';
+        }
+
+        $buffered = $this->passBuffers[$id] ?? [];
+        $this->passBuffers[$id] = [...$buffered, $plan];
+
+        $commands = array_map(static fn (TranslatedCommand $p) => $p->analysisCommand(), $buffered);
+        $commands[] = (string) $plan->commandString;
+
+        $job = $this->client->run(
+            $this->buildInputFiles($plan),
+            array_map(static fn ($o) => $o->name, $plan->outputs),
+            $commands,
+            $this->timeoutSeconds,
+        );
+
+        $this->assertSucceeded($job);
+        $this->reconcileOutputs($plan, $job);
+
+        return "[ffmpeg-api] multipass job {$job->id} succeeded";
+    }
+
+    /**
+     * @return array<string, string> input name => URL
+     */
+    private function buildInputFiles(TranslatedCommand $plan): array
+    {
         $inputFiles = [];
+
         foreach ($plan->inputs as $name => $pathOrUrl) {
             $inputFiles[$name] = preg_match('#^https?://#i', $pathOrUrl)
                 ? $pathOrUrl
                 : $this->client->uploadInput($pathOrUrl);
         }
 
-        $outputDecls = array_map(static fn ($o) => $o->name, $plan->outputs);
-
-        $job = $this->client->run($inputFiles, $outputDecls, [$plan->commandString], $this->timeoutSeconds);
-
-        if (! $job->succeeded()) {
-            throw new RemoteExecutionException("job {$job->id} {$job->status}: {$job->errorMessage}");
+        if ($plan->keyInfo !== null) {
+            $this->attachKeyInfo($plan->keyInfo, $inputFiles);
         }
 
-        $this->reconcileOutputs($plan, $job);
+        return $inputFiles;
+    }
 
-        return "[ffmpeg-api] job {$job->id} succeeded";
+    /**
+     * Encrypted HLS: upload the key under a workdir-relative name, upload a
+     * keyinfo rewritten to point at it (URI line kept verbatim), so the node
+     * encrypts with a key path it can actually resolve.
+     *
+     * @param  array<string, string>  $inputFiles
+     */
+    private function attachKeyInfo(KeyInfoRequest $keyInfo, array &$inputFiles): void
+    {
+        $lines = @file($keyInfo->localPath, FILE_IGNORE_NEW_LINES);
+        if ($lines === false || count($lines) < 2) {
+            throw new RemoteExecutionException("cannot read keyinfo: {$keyInfo->localPath}");
+        }
+
+        [$uri, $keyPath] = $lines;
+        $iv = $lines[2] ?? null;
+
+        if (! is_file($keyPath)) {
+            throw new RemoteExecutionException("key file not found: {$keyPath}");
+        }
+
+        $inputFiles[$keyInfo->keyName] = $this->client->uploadInput($keyPath);
+
+        $content = $uri."\n".$keyInfo->keyName."\n";
+        if ($iv !== null && $iv !== '') {
+            $content .= $iv."\n";
+        }
+
+        $tmp = tempnam(sys_get_temp_dir(), 'ffapi_keyinfo_');
+        file_put_contents($tmp, $content);
+
+        try {
+            $inputFiles[$keyInfo->name] = $this->client->uploadInput($tmp);
+        } finally {
+            @unlink($tmp);
+        }
     }
 
     private function reconcileOutputs(TranslatedCommand $plan, JobResult $job): void
@@ -120,6 +215,13 @@ class FFMpegApiDriver extends FFMpegDriver
 
             $this->client->download($remaining[$output->name], (string) $output->localPath);
             unset($remaining[$output->name]);
+        }
+    }
+
+    private function assertSucceeded(JobResult $job): void
+    {
+        if (! $job->succeeded()) {
+            throw new RemoteExecutionException("job {$job->id} {$job->status}: {$job->errorMessage}");
         }
     }
 }

@@ -10,22 +10,24 @@ namespace Zupolgec\FFMpegApi\Translation;
  * named inputs, declared outputs, and a single command string with
  * {{name}} placeholders.
  *
- * The translation is deliberately conservative: anything it cannot represent
- * with confidence yields a non-remotable result so the driver falls back to
- * the local binary rather than producing a wrong job.
+ * Tokens are classified by option arity: a flag that is not a known boolean
+ * consumes the next token as its value, so trailing positional tokens are
+ * outputs (one or many) and each -i value is an input. Multipass and encrypted
+ * HLS are represented via extra metadata the driver acts on; anything the
+ * translator cannot model with confidence yields a non-remotable result so the
+ * driver falls back to the local binary.
  */
 final class CommandTranslator
 {
-    /**
-     * Flags that force local execution:
-     *  -pass / -passlogfile  multipass is emitted by php-ffmpeg as SEPARATE
-     *                        command() calls; each becomes an independent,
-     *                        stateless remote job, so the pass-1 log never
-     *                        reaches pass 2.
-     *  -hls_key_info_file    encrypted HLS references a key file by a path the
-     *                        remote node cannot resolve.
-     */
-    private const LOCAL_ONLY_FLAGS = ['-pass', '-passlogfile', '-hls_key_info_file'];
+    /** ffmpeg options that take NO argument; everything else consumes the next token. */
+    private const BOOLEAN_FLAGS = [
+        '-y', '-n', '-nostdin', '-nostats', '-hide_banner', '-stats',
+        '-an', '-vn', '-sn', '-dn',
+        '-shortest', '-copyts', '-start_at_zero', '-re', '-ignore_unknown',
+    ];
+
+    /** Output tokens that are sinks, not files to capture. */
+    private const DISCARD_OUTPUTS = ['/dev/null', '/dev/stdout', '-', 'nul', 'null'];
 
     /** @var array<string, true> */
     private array $usedNames = [];
@@ -39,76 +41,140 @@ final class CommandTranslator
         $argv = array_values(array_map('strval', $argv));
         $count = count($argv);
 
-        foreach ($argv as $token) {
-            if (in_array($token, self::LOCAL_ONLY_FLAGS, true)) {
-                return TranslatedCommand::local("unsupported flag {$token}");
-            }
+        if ($count === 0) {
+            return TranslatedCommand::local('empty command');
         }
 
-        // Inputs: the token following each -i.
-        $inputs = [];               // name => path/url
-        $rewriteAs = [];            // argv index => replacement token
-        for ($i = 0; $i < $count; $i++) {
-            if ($argv[$i] === '-i' && $i + 1 < $count) {
-                $value = $argv[$i + 1];
+        // 1. Classify every token by arity.
+        $role = array_fill(0, $count, 'positional'); // positional | flag | value | input
+        for ($i = 0; $i < $count;) {
+            $token = $argv[$i];
 
-                if ($this->isUrl($value)) {
-                    $name = $this->allocate($value);
-                    $inputs[$name] = $value;
-                    $rewriteAs[$i + 1] = '{{'.$name.'}}';
-                } elseif (is_file($value)) {
-                    $name = $this->allocate($value);
-                    $inputs[$name] = $value;
-                    $rewriteAs[$i + 1] = '{{'.$name.'}}';
+            if (str_starts_with($token, '-') && $token !== '-') {
+                $role[$i] = 'flag';
+
+                if (! in_array($token, self::BOOLEAN_FLAGS, true) && $i + 1 < $count) {
+                    $role[$i + 1] = $token === '-i' ? 'input' : 'value';
+                    $i += 2;
+
+                    continue;
                 }
-                // else: virtual input (lavfi, color=, anullsrc, pipe:, -) — leave verbatim.
             }
+
+            $i++;
         }
 
-        // Optional HLS segment template: -hls_segment_filename <path>
+        $rewrite = []; // argv index => replacement token
+
+        // 2. Inputs (the value after each -i).
+        $inputs = [];
+        for ($i = 0; $i < $count; $i++) {
+            if ($role[$i] !== 'input') {
+                continue;
+            }
+
+            $value = $argv[$i];
+
+            if ($this->isUrl($value) || is_file($value)) {
+                $name = $this->allocate($value);
+                $inputs[$name] = $value;
+                $rewrite[$i] = '{{'.$name.'}}';
+            }
+            // else: virtual input (lavfi, color=, anullsrc, pipe:) — leave verbatim.
+        }
+
+        // 3. Special flags.
+        $passNumber = null;
+        $passLogId = null;
+        $keyInfo = null;
         $segmentIndex = null;
         $segmentTemplate = null;
+
         for ($i = 0; $i < $count; $i++) {
-            if ($argv[$i] === '-hls_segment_filename' && $i + 1 < $count) {
-                $segmentIndex = $i + 1;
-                $segmentTemplate = $argv[$i + 1];
+            if ($role[$i] !== 'flag') {
+                continue;
+            }
+
+            $valueIndex = $i + 1;
+            $value = $valueIndex < $count ? $argv[$valueIndex] : null;
+
+            switch ($argv[$i]) {
+                case '-passlogfile':
+                    if ($value !== null) {
+                        $passLogId = $value;
+                        $rewrite[$valueIndex] = 'passlog';
+                    }
+                    break;
+
+                case '-pass':
+                    if ($value !== null && ctype_digit($value)) {
+                        $passNumber = (int) $value;
+                    }
+                    break;
+
+                case '-hls_segment_filename':
+                    if ($value !== null) {
+                        $segmentIndex = $valueIndex;
+                        $segmentTemplate = $value;
+                    }
+                    break;
+
+                case '-hls_key_info_file':
+                    if ($value !== null) {
+                        if (! is_file($value)) {
+                            return TranslatedCommand::local('keyinfo file not found');
+                        }
+                        $name = $this->allocate('keyinfo');
+                        $keyInfo = new KeyInfoRequest($name, $value);
+                        $rewrite[$valueIndex] = '{{'.$name.'}}';
+                    }
+                    break;
             }
         }
 
-        // Primary output: php-ffmpeg always appends the output path last.
-        $lastIndex = $count - 1;
-        $last = $count > 0 ? $argv[$lastIndex] : '';
-        if ($last === '' || str_starts_with($last, '-') || isset($rewriteAs[$lastIndex])) {
-            return TranslatedCommand::local('no output file to capture (probe or piped output)');
-        }
-
+        // 4. Outputs: trailing positional tokens, plus HLS segments as a glob.
         $outputs = [];
+        for ($i = 0; $i < $count; $i++) {
+            if ($role[$i] !== 'positional') {
+                continue;
+            }
 
-        $primaryName = $this->allocate($last);
-        $rewriteAs[$lastIndex] = '{{'.$primaryName.'}}';
-        $outputs[] = OutputTarget::literal($primaryName, $last);
+            $token = $argv[$i];
+            if ($token === '' || in_array(strtolower($token), self::DISCARD_OUTPUTS, true)) {
+                continue;
+            }
+
+            $name = $this->allocate($token);
+            $rewrite[$i] = '{{'.$name.'}}';
+            $outputs[] = OutputTarget::literal($name, $token);
+        }
 
         if ($segmentIndex !== null && $segmentTemplate !== null) {
             $segBase = basename($segmentTemplate);
-            $rewriteAs[$segmentIndex] = $segBase;          // relative -> node workdir
-            $glob = $this->globFromTemplate($segBase);     // seg_%05d.ts -> seg_*.ts
-            $outputs[] = OutputTarget::glob($glob, dirname($last));
+            $rewrite[$segmentIndex] = $segBase;
+            $localDir = isset($outputs[0]) && $outputs[0]->localPath !== null
+                ? dirname($outputs[0]->localPath)
+                : dirname($segmentTemplate);
+            $outputs[] = OutputTarget::glob($this->globFromTemplate($segBase), $localDir);
         }
 
-        // Apply rewrites and quote each token for the (shell-aware) remote splitter.
+        if ($outputs === []) {
+            return TranslatedCommand::local('no capturable output');
+        }
+
+        // 5. Apply rewrites.
         $tokens = [];
         foreach ($argv as $i => $token) {
-            $tokens[$i] = $rewriteAs[$i] ?? $token;
+            $tokens[$i] = $rewrite[$i] ?? $token;
         }
 
-        // Safety net: any leftover token that looks like a real local path means
-        // we failed to model an input/output (e.g. a second output in one call).
-        // Fall back to local rather than ship a broken job.
+        // 6. Safety net: any leftover token that looks like a real local path means
+        // we failed to model an input/output. Fall back rather than ship a broken job.
         foreach ($tokens as $i => $token) {
-            if (isset($rewriteAs[$i])) {
+            if (isset($rewrite[$i]) || $token === '' || str_starts_with($token, '-')) {
                 continue;
             }
-            if ($token === '' || str_starts_with($token, '-')) {
+            if (in_array(strtolower($token), self::DISCARD_OUTPUTS, true)) {
                 continue;
             }
             if (str_starts_with($token, '/') || is_file($token)) {
@@ -116,6 +182,7 @@ final class CommandTranslator
             }
         }
 
+        // 7. Quote for the (shell-aware) remote splitter.
         $encoded = [];
         foreach ($tokens as $token) {
             $quoted = $this->quoteToken($token);
@@ -125,7 +192,14 @@ final class CommandTranslator
             $encoded[] = $quoted;
         }
 
-        return TranslatedCommand::remote($inputs, $outputs, implode(' ', $encoded));
+        return TranslatedCommand::remote(
+            $inputs,
+            $outputs,
+            implode(' ', $encoded),
+            $passNumber,
+            $passLogId,
+            $keyInfo,
+        );
     }
 
     private function isUrl(string $value): bool
@@ -159,10 +233,8 @@ final class CommandTranslator
 
     private function globFromTemplate(string $base): string
     {
-        // seg_%05d.ts / img%d.png -> seg_*.ts / img*.png
         $glob = preg_replace('/%\d*d/', '*', $base) ?? $base;
 
-        // Keep only characters the API allows for output patterns.
         return $this->sanitize($glob, allowGlob: true);
     }
 

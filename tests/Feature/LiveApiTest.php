@@ -61,6 +61,20 @@ it('captures HLS segments through a glob', function () {
         ->toBeGreaterThan(1);
 })->group('live');
 
+it('produces multiple outputs from one command', function () {
+    $client = liveClient();
+
+    $job = $client->run(
+        inputFiles: [],
+        outputFiles: ['clip.mp4', 'thumb.png'],
+        commands: ['-f lavfi -i testsrc=duration=1:size=320x240:rate=10 -map 0:v -c:v libx264 -pix_fmt yuv420p {{clip.mp4}} -map 0:v -frames:v 1 {{thumb.png}}'],
+    );
+
+    expect($job->succeeded())->toBeTrue()
+        ->and($job->outputFiles)->toHaveKey('clip.mp4')
+        ->and($job->outputFiles)->toHaveKey('thumb.png');
+})->group('live');
+
 it('uploads a local input and transcodes it', function () {
     $client = liveClient();
 

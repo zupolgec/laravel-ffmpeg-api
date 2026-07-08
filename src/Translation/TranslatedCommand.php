@@ -9,6 +9,10 @@ namespace Zupolgec\FFMpegApi\Translation;
  *
  * When $remotable is false the command must run on the local binary and
  * $reason explains why (used for logging only).
+ *
+ * Multipass commands are remotable: php-ffmpeg emits each pass as a separate
+ * command() call sharing one -passlogfile, so $passNumber / $passLogId let the
+ * driver correlate them and chain the passes into a single remote job.
  */
 final class TranslatedCommand
 {
@@ -20,6 +24,9 @@ final class TranslatedCommand
         /** @var list<OutputTarget> */
         public readonly array $outputs,
         public readonly ?string $commandString,
+        public readonly ?int $passNumber = null,
+        public readonly ?string $passLogId = null,
+        public readonly ?KeyInfoRequest $keyInfo = null,
     ) {}
 
     public static function local(string $reason): self
@@ -31,8 +38,34 @@ final class TranslatedCommand
      * @param  array<string, string>  $inputs
      * @param  list<OutputTarget>  $outputs
      */
-    public static function remote(array $inputs, array $outputs, string $commandString): self
+    public static function remote(
+        array $inputs,
+        array $outputs,
+        string $commandString,
+        ?int $passNumber = null,
+        ?string $passLogId = null,
+        ?KeyInfoRequest $keyInfo = null,
+    ): self {
+        return new self(true, null, $inputs, $outputs, $commandString, $passNumber, $passLogId, $keyInfo);
+    }
+
+    public function isPass(): bool
     {
-        return new self(true, null, $inputs, $outputs, $commandString);
+        return $this->passNumber !== null && $this->passLogId !== null;
+    }
+
+    /**
+     * Render this pass as an analysis-only command: the real output is replaced
+     * by a null sink so it produces no file, only the shared pass log.
+     */
+    public function analysisCommand(): string
+    {
+        $primary = $this->outputs[0] ?? null;
+
+        if ($primary !== null && ! $primary->isGlob && $this->commandString !== null) {
+            return str_replace('{{'.$primary->name.'}}', '-f null /dev/null', $this->commandString);
+        }
+
+        return (string) $this->commandString;
     }
 }
