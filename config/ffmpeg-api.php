@@ -45,4 +45,10 @@ return [
     'wait_timeout' => (int) env('FFMPEG_API_WAIT_TIMEOUT', 1800),
 
     'connect_timeout' => (int) env('FFMPEG_API_CONNECT_TIMEOUT', 10),
+
+    /*
+    | How often to poll a running job (milliseconds). The agent updates progress
+    | roughly once per second, so ~1000ms is a good default.
+    */
+    'poll_interval_ms' => (int) env('FFMPEG_API_POLL_INTERVAL_MS', 1000),
 ];

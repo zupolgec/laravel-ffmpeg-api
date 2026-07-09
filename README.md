@@ -56,12 +56,16 @@ never ships a job it isn't sure about.
 
 ### Progress
 
-Per-frame progress is **not** forwarded for remote jobs. The public API is
-request/response (`?wait=true` blocks; webhooks fire only on completion) and
-exposes no ffmpeg progress stream on the bearer API, so php-ffmpeg's stderr
-progress listeners have nothing to consume. Jobs still run to completion; you
-just don't get a live percentage. (If the endpoint later exposes a job
-log/progress stream on the bearer API, this can be wired up.)
+`->onProgress()` works. The driver submits the job non-blocking and polls
+`GET /jobs/{id}`, forwarding the endpoint's `progress` (0–100), `eta_seconds`,
+and `speed` into php-ffmpeg's progress listeners — so your existing
+`->onProgress($percentage, $remaining, $rate)` callback fires as usual, with a
+single 0→100 sweep across chained commands (2-pass, HLS). Poll cadence is
+`poll_interval_ms` (default 1000).
+
+Caveat inherited from the API: progress needs a discoverable duration. File
+inputs and any command with `-t`/`-to` report a live percentage; a pure
+generated source with no duration reports `null` until it finishes (then 100).
 
 ## Config
 

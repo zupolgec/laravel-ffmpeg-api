@@ -75,6 +75,39 @@ it('produces multiple outputs from one command', function () {
         ->and($job->outputFiles)->toHaveKey('thumb.png');
 })->group('live');
 
+it('reports progress while polling a running job', function () {
+    $client = liveClient();
+
+    // A file input carries a discoverable duration, so progress is populated.
+    $src = sys_get_temp_dir().'/ffapi_prog_src.mp4';
+    @unlink($src);
+    exec('ffmpeg -y -f lavfi -i testsrc=duration=8:size=640x480:rate=25 -c:v libx264 -pix_fmt yuv420p '.escapeshellarg($src).' 2>/dev/null', $o, $code);
+    if ($code !== 0 || ! file_exists($src)) {
+        test()->markTestSkipped('local ffmpeg needed to build the progress fixture');
+    }
+
+    $url = $client->uploadInput($src);
+
+    $job = $client->submit(
+        inputFiles: ['in.mp4' => $url],
+        outputFiles: ['out.mp4'],
+        commands: ['-i {{in.mp4}} -vf scale=1280:960 -c:v libx264 -preset slower -pix_fmt yuv420p {{out.mp4}}'],
+    );
+
+    $seen = [];
+    $job = $client->await($job, function ($j) use (&$seen) {
+        if ($j->progress !== null) {
+            $seen[] = $j->progress;
+        }
+    });
+
+    expect($job->succeeded())->toBeTrue()
+        ->and($seen)->not->toBeEmpty()
+        ->and(max($seen))->toBe(100.0);
+
+    @unlink($src);
+})->group('live');
+
 it('uploads a local input and transcodes it', function () {
     $client = liveClient();
 

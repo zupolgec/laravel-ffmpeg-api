@@ -240,7 +240,11 @@ final class CommandTranslator
 
     private function allocate(string $path): string
     {
-        $name = $this->sanitize(basename($path), allowGlob: false);
+        // For URLs, derive the name from the path only — a query string (e.g. a
+        // presigned URL's signature) would blow past the filesystem name limit
+        // when the node writes the input to its workdir.
+        $source = $this->isUrl($path) ? (parse_url($path, PHP_URL_PATH) ?: $path) : $path;
+        $name = $this->sanitize(basename($source), allowGlob: false);
         $candidate = $name;
         $n = 1;
 

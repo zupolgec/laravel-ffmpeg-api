@@ -69,10 +69,12 @@ class FFMpegApiDriver extends FFMpegDriver
             return parent::command($command, $bypassErrors, $listeners);
         }
 
+        $progressListeners = $this->normalizeListeners($listeners);
+
         try {
             return $plan->isPass()
-                ? $this->runPass($plan)
-                : $this->runRemote($plan);
+                ? $this->runPass($plan, $progressListeners)
+                : $this->runRemote($plan, $progressListeners);
         } catch (Throwable $e) {
             if ($this->mode === 'remote' && ! $this->fallbackToLocal) {
                 throw new RemoteExecutionException('remote ffmpeg execution failed: '.$e->getMessage(), 0, $e);
@@ -84,16 +86,18 @@ class FFMpegApiDriver extends FFMpegDriver
         }
     }
 
-    private function runRemote(TranslatedCommand $plan): string
+    /**
+     * @param  list<object>  $listeners
+     */
+    private function runRemote(TranslatedCommand $plan, array $listeners): string
     {
-        $job = $this->client->run(
+        $job = $this->runJob(
             $this->buildInputFiles($plan),
             array_map(static fn ($o) => $o->name, $plan->outputs),
             [$plan->commandString],
-            $this->timeoutSeconds,
+            $listeners,
         );
 
-        $this->assertSucceeded($job);
         $this->reconcileOutputs($plan, $job);
 
         return "[ffmpeg-api] job {$job->id} succeeded";
@@ -103,8 +107,10 @@ class FFMpegApiDriver extends FFMpegDriver
      * Multipass: buffer the analysis pass(es), then chain them with the final
      * pass into ONE remote job so the shared pass log survives across passes
      * (they run sequentially in the same node workdir).
+     *
+     * @param  list<object>  $listeners
      */
-    private function runPass(TranslatedCommand $plan): string
+    private function runPass(TranslatedCommand $plan, array $listeners): string
     {
         $id = (string) $plan->passLogId;
 
@@ -120,17 +126,49 @@ class FFMpegApiDriver extends FFMpegDriver
         $commands = array_map(static fn (TranslatedCommand $p) => $p->analysisCommand(), $buffered);
         $commands[] = (string) $plan->commandString;
 
-        $job = $this->client->run(
+        $job = $this->runJob(
             $this->buildInputFiles($plan),
             array_map(static fn ($o) => $o->name, $plan->outputs),
             $commands,
-            $this->timeoutSeconds,
+            $listeners,
         );
 
-        $this->assertSucceeded($job);
         $this->reconcileOutputs($plan, $job);
 
         return "[ffmpeg-api] multipass job {$job->id} succeeded";
+    }
+
+    /**
+     * Submit the job and poll to completion, forwarding progress to any
+     * php-ffmpeg progress listeners so laravel-ffmpeg's onProgress() fires.
+     *
+     * @param  array<string, string>  $inputFiles
+     * @param  list<string>  $outputDecls
+     * @param  list<string>  $commands
+     * @param  list<object>  $listeners
+     */
+    private function runJob(array $inputFiles, array $outputDecls, array $commands, array $listeners): JobResult
+    {
+        $job = $this->client->submit($inputFiles, $outputDecls, $commands, $this->timeoutSeconds);
+
+        $onTick = $listeners === [] ? null : function (JobResult $j) use ($listeners): void {
+            if ($j->progress === null) {
+                return;
+            }
+            // The listener's 'progress' event is wired to the format, which drives
+            // laravel-ffmpeg's onProgress($percentage, $remaining, $rate).
+            foreach ($listeners as $listener) {
+                $listener->emit('progress', [$j->progress, $j->etaSeconds ?? 0, $j->speed ?? 0]);
+            }
+        };
+
+        $job = $this->client->await($job, $onTick, $this->timeoutSeconds);
+
+        if (! $job->succeeded()) {
+            throw new RemoteExecutionException("job {$job->id} {$job->status}: {$job->errorMessage}");
+        }
+
+        return $job;
     }
 
     /**
@@ -218,10 +256,22 @@ class FFMpegApiDriver extends FFMpegDriver
         }
     }
 
-    private function assertSucceeded(JobResult $job): void
+    /**
+     * Normalise the listeners argument to a list of progress emitters.
+     *
+     * @return list<object>
+     */
+    private function normalizeListeners($listeners): array
     {
-        if (! $job->succeeded()) {
-            throw new RemoteExecutionException("job {$job->id} {$job->status}: {$job->errorMessage}");
+        if ($listeners === null) {
+            return [];
         }
+
+        $listeners = is_array($listeners) ? $listeners : [$listeners];
+
+        return array_values(array_filter(
+            $listeners,
+            static fn ($l) => is_object($l) && method_exists($l, 'emit'),
+        ));
     }
 }

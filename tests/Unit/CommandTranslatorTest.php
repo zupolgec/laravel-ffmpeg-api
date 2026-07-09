@@ -67,6 +67,18 @@ it('passes http input URLs through without upload', function () {
         ->and($plan->inputs)->toContain('https://example.com/in.mp4');
 });
 
+it('derives a short input name from a presigned URL, ignoring the query string', function () {
+    $url = 'https://s3.example.com/bucket/path/integrated.mp4?X-Amz-Signature='.str_repeat('a', 300);
+
+    $plan = (new CommandTranslator)->translate([
+        '-i', $url, sys_get_temp_dir().'/o.mp4',
+    ]);
+
+    $name = array_key_first($plan->inputs);
+    expect($name)->toBe('integrated.mp4')
+        ->and($plan->inputs[$name])->toBe($url);
+});
+
 it('models HLS segments as a glob output', function () {
     $in = tmpInput();
     $dir = sys_get_temp_dir();

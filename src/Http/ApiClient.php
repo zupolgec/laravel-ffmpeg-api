@@ -20,6 +20,7 @@ final class ApiClient
         private readonly string $key,
         private readonly int $waitTimeout = 1800,
         private readonly int $connectTimeout = 10,
+        private readonly int $pollIntervalMs = 1000,
     ) {}
 
     public function isConfigured(): bool
@@ -61,13 +62,13 @@ final class ApiClient
     }
 
     /**
-     * Submit a blocking job and return the completed record.
+     * Submit a job without blocking; returns immediately with a queued job.
      *
      * @param  array<string, string>  $inputFiles  name => URL
      * @param  list<string>  $outputFiles  literal names or glob patterns
      * @param  list<string>  $commands
      */
-    public function run(array $inputFiles, array $outputFiles, array $commands, ?int $timeoutSeconds = null): JobResult
+    public function submit(array $inputFiles, array $outputFiles, array $commands, ?int $timeoutSeconds = null): JobResult
     {
         $payload = [
             'input_files' => (object) $inputFiles,
@@ -80,12 +81,59 @@ final class ApiClient
         }
 
         $data = $this->api()
-            ->timeout($this->waitTimeout)
-            ->post('/ffmpeg?wait=true', $payload)
+            ->timeout(30)
+            ->post('/ffmpeg?wait=false', $payload)
             ->throw()
             ->json('data');
 
         return JobResult::fromArray($data ?? []);
+    }
+
+    public function getJob(string $id): JobResult
+    {
+        $data = $this->api()
+            ->timeout(30)
+            ->get('/jobs/'.$id)
+            ->throw()
+            ->json('data');
+
+        return JobResult::fromArray($data ?? []);
+    }
+
+    /**
+     * Poll a job to a terminal state, invoking $onTick(JobResult) after each
+     * refresh (used to forward progress). Returns the terminal job.
+     */
+    public function await(JobResult $job, ?callable $onTick = null, ?int $timeoutSeconds = null): JobResult
+    {
+        $deadline = time() + ($timeoutSeconds ?? $this->waitTimeout);
+
+        while (! $job->isTerminal()) {
+            usleep($this->pollIntervalMs * 1000);
+            $job = $this->getJob($job->id);
+
+            if ($onTick !== null) {
+                $onTick($job);
+            }
+
+            if (time() > $deadline) {
+                throw new RemoteExecutionException("timed out waiting for job {$job->id} (last status: {$job->status})");
+            }
+        }
+
+        return $job;
+    }
+
+    /**
+     * Submit and block until the job finishes (no progress forwarding).
+     *
+     * @param  array<string, string>  $inputFiles
+     * @param  list<string>  $outputFiles
+     * @param  list<string>  $commands
+     */
+    public function run(array $inputFiles, array $outputFiles, array $commands, ?int $timeoutSeconds = null): JobResult
+    {
+        return $this->await($this->submit($inputFiles, $outputFiles, $commands, $timeoutSeconds), null, $timeoutSeconds);
     }
 
     /**

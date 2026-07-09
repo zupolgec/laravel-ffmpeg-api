@@ -25,6 +25,7 @@ class FFMpegApiServiceProvider extends ServiceProvider
                 (string) ($config['key'] ?? ''),
                 (int) ($config['wait_timeout'] ?? 1800),
                 (int) ($config['connect_timeout'] ?? 10),
+                (int) ($config['poll_interval_ms'] ?? 1000),
             );
         });
     }
