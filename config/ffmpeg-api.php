@@ -47,6 +47,13 @@ return [
     'connect_timeout' => (int) env('FFMPEG_API_CONNECT_TIMEOUT', 10),
 
     /*
+    | Worker pool override: 'cpu' or 'nvidia'. Leave empty to auto-detect —
+    | commands using NVIDIA encoders/filters (h264_nvenc, cuda, …) route to a
+    | GPU node automatically, everything else runs on cpu.
+    */
+    'machine' => env('FFMPEG_API_MACHINE'),
+
+    /*
     | How often to poll a running job (milliseconds). The agent updates progress
     | roughly once per second, so ~1000ms is a good default.
     */

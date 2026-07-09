@@ -199,7 +199,24 @@ final class CommandTranslator
             $passNumber,
             $passLogId,
             $keyInfo,
+            $this->detectMachine($argv),
         );
+    }
+
+    /**
+     * Route to a GPU worker pool when the command uses NVIDIA encoders/filters.
+     *
+     * @param  list<string>  $argv
+     */
+    private function detectMachine(array $argv): ?string
+    {
+        foreach ($argv as $token) {
+            if (preg_match('/(?:_nvenc|_cuvid|_nvdec|_npp|scale_cuda|scale_npp|\bcuda\b)/i', $token)) {
+                return 'nvidia';
+            }
+        }
+
+        return null;
     }
 
     private function isUrl(string $value): bool

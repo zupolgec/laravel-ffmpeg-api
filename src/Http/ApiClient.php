@@ -68,7 +68,7 @@ final class ApiClient
      * @param  list<string>  $outputFiles  literal names or glob patterns
      * @param  list<string>  $commands
      */
-    public function submit(array $inputFiles, array $outputFiles, array $commands, ?int $timeoutSeconds = null): JobResult
+    public function submit(array $inputFiles, array $outputFiles, array $commands, ?int $timeoutSeconds = null, ?string $machine = null): JobResult
     {
         $payload = [
             'input_files' => (object) $inputFiles,
@@ -78,6 +78,10 @@ final class ApiClient
 
         if ($timeoutSeconds !== null) {
             $payload['timeout_seconds'] = $timeoutSeconds;
+        }
+
+        if ($machine !== null && $machine !== '') {
+            $payload['machine'] = $machine;
         }
 
         $data = $this->api()
@@ -131,9 +135,9 @@ final class ApiClient
      * @param  list<string>  $outputFiles
      * @param  list<string>  $commands
      */
-    public function run(array $inputFiles, array $outputFiles, array $commands, ?int $timeoutSeconds = null): JobResult
+    public function run(array $inputFiles, array $outputFiles, array $commands, ?int $timeoutSeconds = null, ?string $machine = null): JobResult
     {
-        return $this->await($this->submit($inputFiles, $outputFiles, $commands, $timeoutSeconds), null, $timeoutSeconds);
+        return $this->await($this->submit($inputFiles, $outputFiles, $commands, $timeoutSeconds, $machine), null, $timeoutSeconds);
     }
 
     /**

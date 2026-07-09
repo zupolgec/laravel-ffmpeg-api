@@ -61,6 +61,24 @@ it('captures HLS segments through a glob', function () {
         ->toBeGreaterThan(1);
 })->group('live');
 
+it('encodes on the GPU when routed to the nvidia machine', function () {
+    if (! getenv('FFMPEG_API_HAS_NVIDIA')) {
+        test()->markTestSkipped('set FFMPEG_API_HAS_NVIDIA=1 when the fleet has an NVENC-capable nvidia worker');
+    }
+
+    $client = liveClient();
+
+    $job = $client->run(
+        inputFiles: [],
+        outputFiles: ['gpu.mp4'],
+        commands: ['-f lavfi -i testsrc=duration=2:size=640x480:rate=25 -c:v h264_nvenc -b:v 4000k -pix_fmt yuv420p {{gpu.mp4}}'],
+        machine: 'nvidia',
+    );
+
+    expect($job->succeeded())->toBeTrue()
+        ->and($job->outputFiles)->toHaveKey('gpu.mp4');
+})->group('live');
+
 it('produces multiple outputs from one command', function () {
     $client = liveClient();
 

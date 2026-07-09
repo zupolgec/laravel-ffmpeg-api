@@ -165,6 +165,23 @@ it('records an encrypted HLS keyinfo for driver-side rewrite', function () {
     unlink($keyinfo);
 });
 
+it('routes NVIDIA encoders to the gpu machine, cpu otherwise', function () {
+    $in = tmpInput();
+    $out = sys_get_temp_dir().'/o.mp4';
+
+    $gpu = (new CommandTranslator)->translate([
+        '-i', $in, '-c:v', 'h264_nvenc', '-b:v', '8000k', $out,
+    ]);
+    $cpu = (new CommandTranslator)->translate([
+        '-i', $in, '-c:v', 'libx264', $out,
+    ]);
+
+    expect($gpu->machine)->toBe('nvidia')
+        ->and($cpu->machine)->toBeNull();
+
+    unlink($in);
+});
+
 it('falls back to local for probe/version calls', function () {
     expect((new CommandTranslator)->translate(['-version'])->remotable)->toBeFalse();
 });

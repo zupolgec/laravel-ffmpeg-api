@@ -27,6 +27,8 @@ final class TranslatedCommand
         public readonly ?int $passNumber = null,
         public readonly ?string $passLogId = null,
         public readonly ?KeyInfoRequest $keyInfo = null,
+        /** Preferred worker pool: 'nvidia' when the command uses NVIDIA encoders/filters, else null. */
+        public readonly ?string $machine = null,
     ) {}
 
     public static function local(string $reason): self
@@ -45,8 +47,9 @@ final class TranslatedCommand
         ?int $passNumber = null,
         ?string $passLogId = null,
         ?KeyInfoRequest $keyInfo = null,
+        ?string $machine = null,
     ): self {
-        return new self(true, null, $inputs, $outputs, $commandString, $passNumber, $passLogId, $keyInfo);
+        return new self(true, null, $inputs, $outputs, $commandString, $passNumber, $passLogId, $keyInfo, $machine);
     }
 
     public function isPass(): bool

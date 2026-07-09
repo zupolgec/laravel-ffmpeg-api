@@ -29,6 +29,8 @@ class FFMpegApiDriver extends FFMpegDriver
 
     private ?int $timeoutSeconds = null;
 
+    private ?string $machineOverride = null;
+
     private ?LoggerInterface $apiLogger = null;
 
     /**
@@ -47,6 +49,7 @@ class FFMpegApiDriver extends FFMpegDriver
         $this->mode = (string) ($config['driver'] ?? 'auto');
         $this->fallbackToLocal = (bool) ($config['fallback_to_local'] ?? true);
         $this->timeoutSeconds = isset($config['wait_timeout']) ? (int) $config['wait_timeout'] : null;
+        $this->machineOverride = ($config['machine'] ?? null) ?: null;
         $this->apiLogger = $logger;
     }
 
@@ -96,6 +99,7 @@ class FFMpegApiDriver extends FFMpegDriver
             array_map(static fn ($o) => $o->name, $plan->outputs),
             [$plan->commandString],
             $listeners,
+            $this->resolveMachine($plan),
         );
 
         $this->reconcileOutputs($plan, $job);
@@ -131,6 +135,7 @@ class FFMpegApiDriver extends FFMpegDriver
             array_map(static fn ($o) => $o->name, $plan->outputs),
             $commands,
             $listeners,
+            $this->resolveMachine($plan),
         );
 
         $this->reconcileOutputs($plan, $job);
@@ -147,9 +152,9 @@ class FFMpegApiDriver extends FFMpegDriver
      * @param  list<string>  $commands
      * @param  list<object>  $listeners
      */
-    private function runJob(array $inputFiles, array $outputDecls, array $commands, array $listeners): JobResult
+    private function runJob(array $inputFiles, array $outputDecls, array $commands, array $listeners, ?string $machine = null): JobResult
     {
-        $job = $this->client->submit($inputFiles, $outputDecls, $commands, $this->timeoutSeconds);
+        $job = $this->client->submit($inputFiles, $outputDecls, $commands, $this->timeoutSeconds, $machine);
 
         $onTick = $listeners === [] ? null : function (JobResult $j) use ($listeners): void {
             if ($j->progress === null) {
@@ -254,6 +259,15 @@ class FFMpegApiDriver extends FFMpegDriver
             $this->client->download($remaining[$output->name], (string) $output->localPath);
             unset($remaining[$output->name]);
         }
+    }
+
+    /**
+     * The configured machine override wins; otherwise use what the command
+     * implies (nvidia when it uses NVIDIA encoders/filters).
+     */
+    private function resolveMachine(TranslatedCommand $plan): ?string
+    {
+        return $this->machineOverride ?? $plan->machine;
     }
 
     /**
