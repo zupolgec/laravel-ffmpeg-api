@@ -9,7 +9,7 @@ use Zupolgec\FFMpegApi\Http\ApiClient;
  * Real round-trips against a live ffmpeg-api endpoint. Skipped unless both
  * FFMPEG_API_ENDPOINT and FFMPEG_API_KEY are set, e.g.:
  *
- *   FFMPEG_API_ENDPOINT=http://10.19.88.3:8080 FFMPEG_API_KEY=sk_... \
+ *   FFMPEG_API_ENDPOINT=https://ffmpeg.example.com FFMPEG_API_KEY=sk_... \
  *     vendor/bin/pest --group=live
  */
 function liveClient(): ApiClient
