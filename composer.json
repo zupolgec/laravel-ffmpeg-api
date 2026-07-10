@@ -3,11 +3,16 @@
     "description": "Run pbmedia/laravel-ffmpeg jobs on a remote ffmpeg-api endpoint (verygoodffmpeg.com or a self-hosted instance) instead of the local ffmpeg binary, with automatic local fallback.",
     "keywords": ["laravel", "ffmpeg", "laravel-ffmpeg", "ffmpeg-api", "verygoodffmpeg", "transcoding", "video"],
     "license": "MIT",
+    "homepage": "https://github.com/zupolgec/laravel-ffmpeg-api",
     "authors": [
         {
             "name": "Mattia Trapani"
         }
     ],
+    "support": {
+        "issues": "https://github.com/zupolgec/laravel-ffmpeg-api/issues",
+        "source": "https://github.com/zupolgec/laravel-ffmpeg-api"
+    },
     "require": {
         "php": "^8.2",
         "pbmedia/laravel-ffmpeg": "^8.0",
@@ -40,7 +45,5 @@
             "pestphp/pest-plugin": true
         },
         "sort-packages": true
-    },
-    "minimum-stability": "dev",
-    "prefer-stable": true
+    }
 }
