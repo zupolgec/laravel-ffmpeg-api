@@ -25,7 +25,7 @@ jobs:
     name: PHP ${{ matrix.php }} · Laravel ${{ matrix.laravel }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: shivammathur/setup-php@v2
         with:
@@ -36,7 +36,10 @@ jobs:
         run: composer require --dev "orchestra/testbench:${{ matrix.testbench }}" --no-interaction --no-update
 
       - name: Install dependencies
-        run: composer update --no-interaction --prefer-dist --prefer-stable
+        # Laravel 10/11 are retained as compatibility targets even though their
+        # framework lines now contain advisories. Security is checked separately
+        # against the current dependency set before release.
+        run: composer update --no-interaction --prefer-dist --prefer-stable --no-blocking
 
       - name: Unit tests
         run: vendor/bin/pest --testsuite=Unit
