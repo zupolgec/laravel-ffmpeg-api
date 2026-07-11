@@ -16,12 +16,12 @@
     "require": {
         "php": "^8.2",
         "pbmedia/laravel-ffmpeg": "^8.0",
-        "illuminate/support": "^10.0|^11.0|^12.0",
-        "illuminate/http": "^10.0|^11.0|^12.0"
+        "illuminate/support": "^11.0|^12.0|^13.0",
+        "illuminate/http": "^11.0|^12.0|^13.0"
     },
     "require-dev": {
         "guzzlehttp/guzzle": "^7.2",
-        "orchestra/testbench": "^8.0|^9.0|^10.0",
+        "orchestra/testbench": "^9.10|^10.0|^11.0",
         "pestphp/pest": "^2.0|^3.0"
     },
     "autoload": {
