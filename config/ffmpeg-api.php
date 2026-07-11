@@ -26,8 +26,9 @@ return [
     | remote - send every remotable command to the API (see fallback below).
     | auto   - send remotable commands to the API, run the rest locally.
     |
-    | Commands the translator cannot safely represent (multipass, encrypted
-    | HLS, unmodeled paths, probes) always run locally regardless of mode.
+    | Commands the translator cannot safely represent (unmodeled paths, probes)
+    | always run locally regardless of mode. Multipass and encrypted HLS are
+    | sent to the API (with the passes chained into a single job).
     |
     */
     'driver' => env('FFMPEG_API_DRIVER', 'auto'),
