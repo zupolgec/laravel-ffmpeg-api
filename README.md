@@ -62,6 +62,31 @@ FFMpeg::openUrl('https://cdn.example.com/master.mp4')
     ->save('lowres.mp4');
 ```
 
+### Per-call overrides
+
+The config is the default, not a straitjacket: any setting can be overridden for
+the scope of a closure. Handy when only one recipe in your pipeline is worth
+offloading (a re-encode) while the rest is stream-copy that would only pay the
+upload twice.
+
+```php
+use Zupolgec\FFMpegApi\FFMpegApi;
+
+// This one recipe goes to the GPU pool, no matter the configured driver mode.
+FFMpegApi::remote(fn () => FFMpeg::openUrl($master)
+    ->export()
+    ->inFormat($nvencFormat)
+    ->save($lowres), machine: 'nvidia');
+
+FFMpegApi::local(fn () => /* stream-copy, keep it on this machine */);
+FFMpegApi::on('cpu', fn () => /* pin the pool, keep the driver mode */);
+FFMpegApi::using(['wait_timeout' => 7200], fn () => /* a long one */);
+```
+
+`remote()` defaults to **no local fallback**: a remote-only recipe (an NVENC
+command on a machine with no NVIDIA GPU) should fail loudly rather than be
+replayed on a binary that cannot run it. Pass `fallbackToLocal: true` to opt in.
+
 ## What runs remotely
 
 The translator classifies ffmpeg args by option arity, so it handles a broad set

@@ -23,13 +23,24 @@ class FFMpegApiDriver extends FFMpegDriver
 {
     private ?ApiClient $client = null;
 
-    private string $mode = 'auto';
+    /**
+     * Configured defaults, keyed as in config/ffmpeg-api.php.
+     *
+     * @var array{driver: string, fallback_to_local: bool, wait_timeout: ?int, machine: ?string}
+     */
+    private array $settings = [
+        'driver' => 'auto',
+        'fallback_to_local' => true,
+        'wait_timeout' => null,
+        'machine' => null,
+    ];
 
-    private bool $fallbackToLocal = true;
-
-    private ?int $timeoutSeconds = null;
-
-    private ?string $machineOverride = null;
+    /**
+     * Scoped overrides pushed by FFMpegApi::using(); the innermost wins.
+     *
+     * @var list<array<string, mixed>>
+     */
+    private array $overrides = [];
 
     private ?LoggerInterface $apiLogger = null;
 
@@ -48,11 +59,51 @@ class FFMpegApiDriver extends FFMpegDriver
     public function configureRemote(ApiClient $client, array $config, ?LoggerInterface $logger = null): void
     {
         $this->client = $client;
-        $this->mode = (string) ($config['driver'] ?? 'auto');
-        $this->fallbackToLocal = (bool) ($config['fallback_to_local'] ?? true);
-        $this->timeoutSeconds = isset($config['wait_timeout']) ? (int) $config['wait_timeout'] : null;
-        $this->machineOverride = ($config['machine'] ?? null) ?: null;
+        $this->settings = [
+            'driver' => (string) ($config['driver'] ?? 'auto'),
+            'fallback_to_local' => (bool) ($config['fallback_to_local'] ?? true),
+            'wait_timeout' => isset($config['wait_timeout']) ? (int) $config['wait_timeout'] : null,
+            'machine' => ($config['machine'] ?? null) ?: null,
+        ];
         $this->apiLogger = $logger;
+    }
+
+    /**
+     * Apply per-call overrides for the duration of $callback: any of driver,
+     * fallback_to_local, machine, wait_timeout. Nestable; always restored.
+     *
+     * @param  array<string, mixed>  $overrides
+     */
+    public function withSettings(array $overrides, callable $callback): mixed
+    {
+        $this->overrides[] = $overrides;
+
+        try {
+            return $callback();
+        } finally {
+            array_pop($this->overrides);
+        }
+    }
+
+    /**
+     * The effective value of a setting: innermost scoped override, else config.
+     */
+    private function setting(string $key): mixed
+    {
+        foreach (array_reverse($this->overrides) as $override) {
+            if (array_key_exists($key, $override)) {
+                return $override[$key];
+            }
+        }
+
+        return $this->settings[$key] ?? null;
+    }
+
+    private function timeout(): ?int
+    {
+        $timeout = $this->setting('wait_timeout');
+
+        return $timeout === null ? null : (int) $timeout;
     }
 
     /**
@@ -60,7 +111,7 @@ class FFMpegApiDriver extends FFMpegDriver
      */
     public function command($command, $bypassErrors = false, $listeners = null)
     {
-        if ($this->mode === 'local' || $this->client === null || ! $this->client->isConfigured()) {
+        if ($this->setting('driver') === 'local' || $this->client === null || ! $this->client->isConfigured()) {
             return $this->runLocal($command, $bypassErrors, $listeners);
         }
 
@@ -81,7 +132,7 @@ class FFMpegApiDriver extends FFMpegDriver
                 ? $this->runPass($plan, $command, $bypassErrors, $listeners, $progressListeners)
                 : $this->runRemote($plan, $progressListeners);
         } catch (Throwable $e) {
-            if ($this->mode === 'remote' && ! $this->fallbackToLocal) {
+            if ($this->setting('driver') === 'remote' && ! $this->setting('fallback_to_local')) {
                 $this->forgetPasses($plan);
 
                 throw new RemoteExecutionException('remote ffmpeg execution failed: '.$e->getMessage(), 0, $e);
@@ -206,7 +257,7 @@ class FFMpegApiDriver extends FFMpegDriver
      */
     private function runJob(array $inputFiles, array $outputDecls, array $commands, array $listeners, ?string $machine = null): JobResult
     {
-        $job = $this->client->submit($inputFiles, $outputDecls, $commands, $this->timeoutSeconds, $machine);
+        $job = $this->client->submit($inputFiles, $outputDecls, $commands, $this->timeout(), $machine);
 
         $onTick = $listeners === [] ? null : function (JobResult $j) use ($listeners): void {
             if ($j->progress === null) {
@@ -219,7 +270,7 @@ class FFMpegApiDriver extends FFMpegDriver
             }
         };
 
-        $job = $this->client->await($job, $onTick, $this->timeoutSeconds);
+        $job = $this->client->await($job, $onTick, $this->timeout());
 
         if (! $job->succeeded()) {
             throw new RemoteExecutionException("job {$job->id} {$job->status}: {$job->errorMessage}");
@@ -319,7 +370,7 @@ class FFMpegApiDriver extends FFMpegDriver
      */
     private function resolveMachine(TranslatedCommand $plan): ?string
     {
-        return $this->machineOverride ?? $plan->machine;
+        return $this->setting('machine') ?? $plan->machine;
     }
 
     /**

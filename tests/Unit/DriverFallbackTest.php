@@ -2,8 +2,11 @@
 
 declare(strict_types=1);
 
+use FFMpeg\Driver\FFMpegDriver;
+use Illuminate\Container\Container;
 use Illuminate\Http\Client\Factory;
 use Zupolgec\FFMpegApi\Exceptions\RemoteExecutionException;
+use Zupolgec\FFMpegApi\FFMpegApi;
 use Zupolgec\FFMpegApi\FFMpegApiDriver;
 use Zupolgec\FFMpegApi\Http\ApiClient;
 
@@ -171,6 +174,72 @@ it('throws when the job succeeds but omits an expected output', function () {
 
     expect(fn () => $driver->command(['-y', '-i', 'http://cdn.test/in.mp4', '-c:v', 'libx264', $out]))
         ->toThrow(RemoteExecutionException::class);
+});
+
+it('keeps a command local for the duration of a local override', function () {
+    $cmd = ['-y', '-i', 'http://cdn.test/in.mp4', '-c:v', 'libx264', sys_get_temp_dir().'/scoped.mp4'];
+    $http = failingHttp();
+    $driver = makeDriver($http, ['driver' => 'auto', 'fallback_to_local' => true]);
+
+    $result = $driver->withSettings(['driver' => 'local'], fn () => $driver->command($cmd));
+
+    expect($result)->toBe('local-ok')
+        ->and($driver->localCalls)->toBe([$cmd]);
+    $http->assertSentCount(0);
+});
+
+it('restores the configured settings once the override scope ends', function () {
+    $cmd = ['-y', '-i', 'http://cdn.test/in.mp4', '-c:v', 'libx264', sys_get_temp_dir().'/restored.mp4'];
+    $http = failingHttp();
+    $driver = makeDriver($http, ['driver' => 'auto', 'fallback_to_local' => true]);
+
+    $driver->withSettings(['driver' => 'local'], fn () => $driver->command($cmd));
+    $driver->command($cmd);
+
+    // The second call is back on 'auto', so it does hit the API (and only then
+    // falls back locally because the fake fails).
+    $http->assertSentCount(1);
+    expect($driver->localCalls)->toBe([$cmd, $cmd]);
+});
+
+it('pins the worker pool for the duration of a machine override', function () {
+    $payload = null;
+    $http = new Factory;
+    $http->fake([
+        '*/api/ffmpeg*' => function ($request) use (&$payload, $http) {
+            $payload = $request->data();
+
+            return $http->response(['message' => 'boom'], 500);
+        },
+    ]);
+
+    $driver = makeDriver($http, ['driver' => 'auto', 'fallback_to_local' => true]);
+
+    $driver->withSettings(['machine' => 'nvidia'], fn () => $driver->command(
+        ['-y', '-i', 'http://cdn.test/in.mp4', '-c:v', 'libx264', sys_get_temp_dir().'/gpu.mp4']
+    ));
+
+    expect($payload['machine'])->toBe('nvidia');
+});
+
+it('exposes the overrides through the FFMpegApi entry point', function () {
+    $cmd = ['-y', '-i', 'http://cdn.test/in.mp4', '-c:v', 'libx264', sys_get_temp_dir().'/facade.mp4'];
+    $http = failingHttp();
+    $driver = makeDriver($http, ['driver' => 'auto', 'fallback_to_local' => true]);
+
+    $container = new Container;
+    $container->instance(FFMpegDriver::class, $driver);
+    Container::setInstance($container);
+
+    // remote() defaults to no local fallback: a remote-only recipe must fail
+    // loudly instead of being replayed on a binary that cannot run it.
+    expect(fn () => FFMpegApi::remote(fn () => $driver->command($cmd), machine: 'nvidia'))
+        ->toThrow(RemoteExecutionException::class)
+        ->and($driver->localCalls)->toBe([]);
+
+    expect(FFMpegApi::local(fn () => $driver->command($cmd)))->toBe('local-ok');
+
+    Container::setInstance(null);
 });
 
 it('presigns, uploads a local input, and returns its download URL', function () {
